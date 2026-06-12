@@ -4,3 +4,4 @@ vendor/
 organs/turbovec-server/target/
 *.tvim
 .DS_Store
+dist/

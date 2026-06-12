@@ -35,11 +35,19 @@ void extract_zip_payloads(const std::string& db_dir) {
   std::string bin = db_dir + "/runtime/bin";
   std::string stamp = bin + "/.extracted-" + kVersion;
   if (fs::exists(stamp)) return;
-  if (!fs::exists("/zip/organs")) return;  // dev build: nothing embedded
+  // zipalign junks directory prefixes, so payloads sit at the /zip root
+  // under their well-known names.
+  static const char* kOrgans[] = {"llamafile", "qlever-server", "qlever-index",
+                                  "turbovec-server"};
+  bool any = false;
+  for (const char* name : kOrgans) any = any || fs::exists(std::string("/zip/") + name);
+  if (!any) return;  // dev build: nothing embedded
   fs::create_directories(bin);
-  for (const auto& f : fs::directory_iterator("/zip/organs")) {
-    std::string dst = bin + "/" + f.path().filename().string();
-    std::ifstream in(f.path(), std::ios::binary);
+  for (const char* name : kOrgans) {
+    std::string src = std::string("/zip/") + name;
+    if (!fs::exists(src)) continue;
+    std::string dst = bin + "/" + name;
+    std::ifstream in(src, std::ios::binary);
     std::ofstream out(dst, std::ios::binary | std::ios::trunc);
     out << in.rdbuf();
     out.close();
@@ -47,17 +55,15 @@ void extract_zip_payloads(const std::string& db_dir) {
                              fs::perms::others_read);
   }
   // Full flavor: weights embedded too (DECISIONS.md D3). 7+ GB copy, once.
-  if (fs::exists("/zip/models")) {
-    std::string mod = db_dir + "/runtime/model";
+  std::string mod = db_dir + "/runtime/model";
+  for (const auto& f : fs::directory_iterator("/zip")) {
+    if (f.path().extension() != ".gguf" || fs::exists(mod + "/model.gguf")) continue;
+    std::fprintf(stderr, "extracting embedded model weights (one-time, several GB)...\n");
     fs::create_directories(mod);
-    for (const auto& f : fs::directory_iterator("/zip/models"))
-      if (f.path().extension() == ".gguf" && !fs::exists(mod + "/model.gguf")) {
-        std::fprintf(stderr, "extracting embedded model weights (one-time, several GB)...\n");
-        std::ifstream in(f.path(), std::ios::binary);
-        std::ofstream out(mod + "/model.gguf", std::ios::binary | std::ios::trunc);
-        out << in.rdbuf();
-        break;
-      }
+    std::ifstream in(f.path(), std::ios::binary);
+    std::ofstream out(mod + "/model.gguf", std::ios::binary | std::ios::trunc);
+    out << in.rdbuf();
+    break;
   }
   std::ofstream(stamp) << kVersion;
 }
