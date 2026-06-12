@@ -1,0 +1,6 @@
+build-native/
+build-cosmo/
+vendor/
+organs/turbovec-server/target/
+*.tvim
+.DS_Store
