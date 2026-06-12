@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <string>
 
@@ -127,11 +128,20 @@ static void test_walk() {
   write_file(d + "/secret/s.txt", "hidden");
 
   std::vector<std::string> seen;
-  walk(d, {}, [&](const WalkEntry& e) { seen.push_back(e.rel_path); });
+  std::map<std::string, std::string> modality;
+  walk(d, {}, [&](const WalkEntry& e) {
+    seen.push_back(e.rel_path);
+    modality[e.rel_path] = e.modality;
+  });
   std::sort(seen.begin(), seen.end());
-  CHECK(seen.size() == 2);
+  // img.png is admitted as image-modality media (multimodal pipeline);
+  // raw.bin / noext stay excluded as unsniffable binaries.
+  CHECK(seen.size() == 3);
   CHECK(seen[0] == "a.md");
   CHECK(seen[1] == "code/x.py");
+  CHECK(seen[2] == "img.png");
+  CHECK(modality["img.png"] == "image");
+  CHECK(modality["a.md"] == "text");
 
   // include/exclude
   std::vector<std::string> only_py;

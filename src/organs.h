@@ -17,6 +17,8 @@ namespace chimera {
 struct RuntimePaths {
   std::string llamafile;      // llamafile server binary
   std::string model;          // GGUF weights
+  std::string mmproj;         // multimodal projector GGUF (optional: empty =
+                              // text-only; media derivation/embedding off)
   std::string qlever_server;
   std::string qlever_index;   // index *builder* binary
   std::string turbovec;
@@ -40,10 +42,20 @@ class LlamaClient {
   // dropped). temperature/max_tokens per Appendix A/B usage.
   std::optional<std::string> chat(const std::string& system, const std::string& user,
                                   double temperature, int max_tokens);
+  // Chat with one attached media item (image or audio), e.g. for
+  // transcription/description. mime e.g. "image/png", "audio/wav".
+  std::optional<std::string> chat_media(const std::string& user,
+                                        const std::string& media_b64,
+                                        const std::string& mime,
+                                        double temperature, int max_tokens);
+  // Raw media embedding via {prompt_string: <media marker>, multimodal_data}.
+  // Only available on the CPU backend (the server refuses with 501 on GPU).
+  std::optional<std::vector<float>> embed_media(const std::string& media_b64);
   int port() const { return port_; }
 
  private:
   int port_;
+  std::string media_marker_;  // cached from /props on first embed_media
 };
 
 class QleverClient {
@@ -64,8 +76,10 @@ class TurboVecClient {
   explicit TurboVecClient(int port) : port_(port) {}
   bool upsert(const std::vector<uint64_t>& ids,
               const std::vector<std::vector<float>>& vectors);
-  // Single query vector → hits with vec_key + cosine score.
-  std::optional<std::vector<Hit>> query(const std::vector<float>& vec, int k);
+  // Single query vector → hits with vec_key + cosine score. A non-empty
+  // allowlist restricts the search to those keys (same-modality search).
+  std::optional<std::vector<Hit>> query(const std::vector<float>& vec, int k,
+                                        const std::vector<uint64_t>& allowlist = {});
   bool remove(const std::vector<uint64_t>& ids);
   bool persist();
   // {dim (0 if unset), count}

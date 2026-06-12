@@ -32,10 +32,11 @@ struct PathInfo {
 struct ChunkRow {
   std::string chunk_id;
   std::string doc_id;
-  int ordinal = 0;
+  int ordinal = 0;          // 0 is reserved for a document's raw-media vector
   uint64_t vec_key = 0;
   int64_t byte_start = 0;
   int64_t byte_end = 0;
+  std::string modality = "text";  // text | image | audio (vector space tag)
 };
 
 struct Scoreboard {
@@ -76,6 +77,9 @@ class Manifest {
   std::vector<ChunkRow> chunks_of(const std::string& doc_id);
   // Reverse lookup for search results coming back from TurboVec.
   std::optional<std::string> chunk_by_vec_key(uint64_t key);
+  // All vector keys in a given modality (ordinal-0 media vectors for
+  // image/audio) — the allowlist for same-modality search.
+  std::vector<uint64_t> vec_keys_of_modality(const std::string& modality);
 
   // -- meta / stats ----------------------------------------------------------
   void set_meta(const std::string& key, const std::string& value);

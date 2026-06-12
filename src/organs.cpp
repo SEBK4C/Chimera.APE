@@ -35,29 +35,38 @@ void extract_zip_payloads(const std::string& db_dir) {
   std::string bin = db_dir + "/runtime/bin";
   std::string stamp = bin + "/.extracted-" + kVersion;
   if (fs::exists(stamp)) return;
-  if (!fs::exists("/zip/organs")) return;  // dev build: nothing embedded
+  // zipalign junks directory prefixes, so payloads sit at the /zip root
+  // under their well-known names.
+  static const char* kOrgans[] = {"llamafile", "qlever-server", "qlever-index",
+                                  "turbovec-server"};
+  bool any = false;
+  for (const char* name : kOrgans) any = any || fs::exists(std::string("/zip/") + name);
+  if (!any) return;  // dev build: nothing embedded
   fs::create_directories(bin);
-  for (const auto& f : fs::directory_iterator("/zip/organs")) {
-    std::string dst = bin + "/" + f.path().filename().string();
-    std::ifstream in(f.path(), std::ios::binary);
+  for (const char* name : kOrgans) {
+    std::string src = std::string("/zip/") + name;
+    if (!fs::exists(src)) continue;
+    std::string dst = bin + "/" + name;
+    std::ifstream in(src, std::ios::binary);
     std::ofstream out(dst, std::ios::binary | std::ios::trunc);
     out << in.rdbuf();
     out.close();
     fs::permissions(dst, fs::perms::owner_all | fs::perms::group_read |
                              fs::perms::others_read);
   }
-  // Full flavor: weights embedded too (DECISIONS.md D3). 7+ GB copy, once.
-  if (fs::exists("/zip/models")) {
-    std::string mod = db_dir + "/runtime/model";
+  // Full flavor: weights (+ multimodal projector) embedded too (D3).
+  std::string mod = db_dir + "/runtime/model";
+  for (const auto& f : fs::directory_iterator("/zip")) {
+    if (f.path().extension() != ".gguf") continue;
+    bool is_mmproj = f.path().filename().string().rfind("mmproj", 0) == 0;
+    std::string dst = mod + (is_mmproj ? "/mmproj.gguf" : "/model.gguf");
+    if (fs::exists(dst)) continue;
+    std::fprintf(stderr, "extracting embedded %s (one-time)...\n",
+                 is_mmproj ? "projector" : "model weights (several GB)");
     fs::create_directories(mod);
-    for (const auto& f : fs::directory_iterator("/zip/models"))
-      if (f.path().extension() == ".gguf" && !fs::exists(mod + "/model.gguf")) {
-        std::fprintf(stderr, "extracting embedded model weights (one-time, several GB)...\n");
-        std::ifstream in(f.path(), std::ios::binary);
-        std::ofstream out(mod + "/model.gguf", std::ios::binary | std::ios::trunc);
-        out << in.rdbuf();
-        break;
-      }
+    std::ifstream in(f.path(), std::ios::binary);
+    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
+    out << in.rdbuf();
   }
   std::ofstream(stamp) << kVersion;
 }
@@ -75,6 +84,15 @@ RuntimePaths RuntimePaths::resolve(const std::string& db_dir, const std::string&
   r.turbovec = env_or("CHIMERA_TURBOVEC", bin + "turbovec-server");
   r.model = !model_flag.empty() ? model_flag
                                 : env_or("CHIMERA_MODEL", mod + "model.gguf");
+  // The projector enables image/audio understanding. Look beside the model
+  // for the conventional mmproj-<model>.gguf, then the runtime dir.
+  r.mmproj = env_or("CHIMERA_MMPROJ", "");
+  if (r.mmproj.empty() && !r.model.empty()) {
+    fs::path mp = fs::path(r.model).parent_path() /
+                  ("mmproj-" + fs::path(r.model).filename().string());
+    if (fs::exists(mp)) r.mmproj = mp.string();
+  }
+  if (r.mmproj.empty() && fs::exists(mod + "mmproj.gguf")) r.mmproj = mod + "mmproj.gguf";
   return r;
 }
 
@@ -144,6 +162,72 @@ std::optional<std::string> LlamaClient::chat(const std::string& system,
   }
 }
 
+std::optional<std::string> LlamaClient::chat_media(const std::string& user,
+                                                   const std::string& media_b64,
+                                                   const std::string& mime,
+                                                   double temperature, int max_tokens) {
+  json part;
+  if (mime.rfind("image/", 0) == 0) {
+    part = {{"type", "image_url"},
+            {"image_url", {{"url", "data:" + mime + ";base64," + media_b64}}}};
+  } else {
+    std::string format = mime == "audio/mpeg" ? "mp3" : "wav";
+    part = {{"type", "input_audio"},
+            {"input_audio", {{"data", media_b64}, {"format", format}}}};
+  }
+  json req{{"messages", json::array({{{"role", "user"},
+                                      {"content", json::array({
+                                           {{"type", "text"}, {"text", user}},
+                                           part,
+                                       })}}})},
+           {"temperature", temperature},
+           {"max_tokens", max_tokens}};
+  auto resp = http_post(port_, "/v1/chat/completions", req.dump(),
+                        "application/json", /*timeout_ms=*/600000);
+  if (!resp || resp->status != 200) return std::nullopt;
+  try {
+    json j = json::parse(resp->body);
+    const auto& msg = j.at("choices").at(0).at("message");
+    std::string content = msg.value("content", "");
+    if (msg.contains("content") && msg.at("content").is_null()) content = "";
+    if (content.empty()) content = msg.value("reasoning_content", "");
+    return content;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+std::optional<std::vector<float>> LlamaClient::embed_media(const std::string& media_b64) {
+  if (media_marker_.empty()) {
+    auto props = http_get(port_, "/props");
+    if (!props || props->status != 200) return std::nullopt;
+    try {
+      media_marker_ = json::parse(props->body).value("media_marker", "");
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+    if (media_marker_.empty()) return std::nullopt;
+  }
+  json req{{"input", {{"prompt_string", media_marker_},
+                      {"multimodal_data", json::array({media_b64})}}}};
+  auto resp = http_post(port_, "/v1/embeddings", req.dump(), "application/json",
+                        /*timeout_ms=*/600000);
+  if (!resp || resp->status != 200) return std::nullopt;  // 501 on GPU backend
+  try {
+    json j = json::parse(resp->body);
+    auto vec = j.at("data").at(0).at("embedding").get<std::vector<float>>();
+    double n2 = 0;
+    for (float v : vec) n2 += double(v) * v;
+    if (n2 > 0) {
+      float inv = static_cast<float>(1.0 / std::sqrt(n2));
+      for (float& v : vec) v *= inv;
+    }
+    return vec;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
 // ---- QleverClient ----------------------------------------------------------
 
 std::optional<std::string> QleverClient::query(const std::string& sparql, int timeout_ms) {
@@ -169,8 +253,10 @@ bool TurboVecClient::upsert(const std::vector<uint64_t>& ids,
   return resp && resp->status == 200;
 }
 
-std::optional<std::vector<Hit>> TurboVecClient::query(const std::vector<float>& vec, int k) {
+std::optional<std::vector<Hit>> TurboVecClient::query(const std::vector<float>& vec, int k,
+                                                      const std::vector<uint64_t>& allowlist) {
   json req{{"vectors", json::array({vec})}, {"k", k}};
+  if (!allowlist.empty()) req["allowlist"] = allowlist;
   auto resp = http_post(port_, "/query", req.dump());
   if (!resp || resp->status != 200) return std::nullopt;
   try {
@@ -225,6 +311,10 @@ LlamaClient* Organs::llama() {
       paths_.llamafile, "--server", "-m", paths_.model,
       "--embeddings", "--pooling", "mean", "-c", "8192", "-np", "2",
       "--host", "127.0.0.1", "--port", std::to_string(port)};
+  if (!paths_.mmproj.empty()) {
+    argv.push_back("--mmproj");
+    argv.push_back(paths_.mmproj);
+  }
   if (!llama_child_.spawn(argv, db_dir_ + "/logs/llamafile.log")) {
     error_ = "llamafile spawn: " + llama_child_.error();
     return nullptr;
@@ -295,6 +385,10 @@ void Organs::stop_qlever() {
 
 TurboVecClient* Organs::turbovec() {
   if (turbovec_client_) return turbovec_client_.get();
+  // Known issue: under the cosmo APE build, rayon's thread parking degrades
+  // to busy-spinning and an idle pool can eat every core (observed 2174%
+  // CPU). Cap the pool; encoding batches our size don't miss the threads.
+  ::setenv("RAYON_NUM_THREADS", "2", /*overwrite=*/0);
   int port = pick_port();
   fs::create_directories(db_dir_ + "/turbovec");
   fs::create_directories(db_dir_ + "/logs");

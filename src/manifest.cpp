@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS chunk(
   ordinal INTEGER NOT NULL,
   veckey INTEGER NOT NULL UNIQUE,
   byte_start INTEGER NOT NULL,
-  byte_end INTEGER NOT NULL
+  byte_end INTEGER NOT NULL,
+  modality TEXT NOT NULL DEFAULT 'text'
 );
 CREATE INDEX IF NOT EXISTS chunk_doc ON chunk(docid);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -97,6 +98,9 @@ void Manifest::open(const std::string& db_path) {
     sqlite3_free(err);
     throw std::runtime_error("manifest init: " + msg);
   }
+  // Migration for pre-multimodal manifests; harmless error if present.
+  sqlite3_exec(db_, "ALTER TABLE chunk ADD COLUMN modality TEXT NOT NULL DEFAULT 'text'",
+               nullptr, nullptr, nullptr);
 }
 
 void Manifest::close() {
@@ -176,12 +180,20 @@ void Manifest::forget_doc(const std::string& doc_id) {
 
 void Manifest::insert_chunk(const ChunkRow& c) {
   Stmt s(db_,
-         "INSERT OR REPLACE INTO chunk(chunkid,docid,ordinal,veckey,byte_start,byte_end) "
-         "VALUES(?1,?2,?3,?4,?5,?6)");
+         "INSERT OR REPLACE INTO chunk(chunkid,docid,ordinal,veckey,byte_start,byte_end,modality) "
+         "VALUES(?1,?2,?3,?4,?5,?6,?7)");
   s.bind(1, c.chunk_id).bind(2, c.doc_id).bind(3, static_cast<int64_t>(c.ordinal));
   s.bind_u64(4, c.vec_key);
-  s.bind(5, c.byte_start).bind(6, c.byte_end);
+  s.bind(5, c.byte_start).bind(6, c.byte_end).bind(7, c.modality);
   s.exec();
+}
+
+std::vector<uint64_t> Manifest::vec_keys_of_modality(const std::string& modality) {
+  Stmt s(db_, "SELECT veckey FROM chunk WHERE modality=?1");
+  s.bind(1, modality);
+  std::vector<uint64_t> out;
+  while (s.row()) out.push_back(static_cast<uint64_t>(s.col_i64(0)));
+  return out;
 }
 
 std::vector<ChunkRow> Manifest::chunks_of(const std::string& doc_id) {
