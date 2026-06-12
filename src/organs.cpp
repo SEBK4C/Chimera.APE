@@ -363,6 +363,10 @@ void Organs::stop_qlever() {
 
 TurboVecClient* Organs::turbovec() {
   if (turbovec_client_) return turbovec_client_.get();
+  // Known issue: under the cosmo APE build, rayon's thread parking degrades
+  // to busy-spinning and an idle pool can eat every core (observed 2174%
+  // CPU). Cap the pool; encoding batches our size don't miss the threads.
+  ::setenv("RAYON_NUM_THREADS", "2", /*overwrite=*/0);
   int port = pick_port();
   fs::create_directories(db_dir_ + "/turbovec");
   fs::create_directories(db_dir_ + "/logs");
