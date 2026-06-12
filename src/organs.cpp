@@ -144,6 +144,72 @@ std::optional<std::string> LlamaClient::chat(const std::string& system,
   }
 }
 
+std::optional<std::string> LlamaClient::chat_media(const std::string& user,
+                                                   const std::string& media_b64,
+                                                   const std::string& mime,
+                                                   double temperature, int max_tokens) {
+  json part;
+  if (mime.rfind("image/", 0) == 0) {
+    part = {{"type", "image_url"},
+            {"image_url", {{"url", "data:" + mime + ";base64," + media_b64}}}};
+  } else {
+    std::string format = mime == "audio/mpeg" ? "mp3" : "wav";
+    part = {{"type", "input_audio"},
+            {"input_audio", {{"data", media_b64}, {"format", format}}}};
+  }
+  json req{{"messages", json::array({{{"role", "user"},
+                                      {"content", json::array({
+                                           {{"type", "text"}, {"text", user}},
+                                           part,
+                                       })}}})},
+           {"temperature", temperature},
+           {"max_tokens", max_tokens}};
+  auto resp = http_post(port_, "/v1/chat/completions", req.dump(),
+                        "application/json", /*timeout_ms=*/600000);
+  if (!resp || resp->status != 200) return std::nullopt;
+  try {
+    json j = json::parse(resp->body);
+    const auto& msg = j.at("choices").at(0).at("message");
+    std::string content = msg.value("content", "");
+    if (msg.contains("content") && msg.at("content").is_null()) content = "";
+    if (content.empty()) content = msg.value("reasoning_content", "");
+    return content;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+std::optional<std::vector<float>> LlamaClient::embed_media(const std::string& media_b64) {
+  if (media_marker_.empty()) {
+    auto props = http_get(port_, "/props");
+    if (!props || props->status != 200) return std::nullopt;
+    try {
+      media_marker_ = json::parse(props->body).value("media_marker", "");
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+    if (media_marker_.empty()) return std::nullopt;
+  }
+  json req{{"input", {{"prompt_string", media_marker_},
+                      {"multimodal_data", json::array({media_b64})}}}};
+  auto resp = http_post(port_, "/v1/embeddings", req.dump(), "application/json",
+                        /*timeout_ms=*/600000);
+  if (!resp || resp->status != 200) return std::nullopt;  // 501 on GPU backend
+  try {
+    json j = json::parse(resp->body);
+    auto vec = j.at("data").at(0).at("embedding").get<std::vector<float>>();
+    double n2 = 0;
+    for (float v : vec) n2 += double(v) * v;
+    if (n2 > 0) {
+      float inv = static_cast<float>(1.0 / std::sqrt(n2));
+      for (float& v : vec) v *= inv;
+    }
+    return vec;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
 // ---- QleverClient ----------------------------------------------------------
 
 std::optional<std::string> QleverClient::query(const std::string& sparql, int timeout_ms) {
@@ -169,8 +235,10 @@ bool TurboVecClient::upsert(const std::vector<uint64_t>& ids,
   return resp && resp->status == 200;
 }
 
-std::optional<std::vector<Hit>> TurboVecClient::query(const std::vector<float>& vec, int k) {
+std::optional<std::vector<Hit>> TurboVecClient::query(const std::vector<float>& vec, int k,
+                                                      const std::vector<uint64_t>& allowlist) {
   json req{{"vectors", json::array({vec})}, {"k", k}};
+  if (!allowlist.empty()) req["allowlist"] = allowlist;
   auto resp = http_post(port_, "/query", req.dump());
   if (!resp || resp->status != 200) return std::nullopt;
   try {

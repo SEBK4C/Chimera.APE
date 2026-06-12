@@ -130,15 +130,61 @@ int run_search(const Options& o) {
                  "note: keyword index is stale (incremental ingests since "
                  "last build); run `chimera vacuum` to rebuild\n");
 
+  // ---- 0b. media query? Derive text + same-modality vector hits --------------
+  // The modality gap (docs/DECISIONS.md, mm-embedding.md) means a raw image/
+  // audio vector only ranks meaningfully against vectors of the SAME
+  // modality; the derived transcription/description bridges into text space.
+  std::string query_text = o.query;
+  std::vector<std::pair<std::string, double>> media_ranked;  // chunkID, cosine
+  if (!o.search_file.empty()) {
+    auto bytes = read_file(o.search_file);
+    if (!bytes) {
+      std::fprintf(stderr, "chimera: cannot read %s\n", o.search_file.c_str());
+      return 1;
+    }
+    std::string modality = modality_of(o.search_file);
+    if (modality == "text") {
+      query_text = *bytes;  // plain text file as query
+    } else {
+      std::string b64 = base64_encode(*bytes);
+      std::string mime = mime_of(o.search_file);
+      const char* prompt = modality == "image"
+          ? "If this image contains readable text, transcribe it verbatim. "
+            "Otherwise describe the scene concisely. Output only that."
+          : "Transcribe this audio verbatim. If not speech, describe the "
+            "sound concisely. Output only that.";
+      std::fprintf(stderr, "deriving query text from %s...\n", modality.c_str());
+      auto derived = llama->chat_media(prompt, b64, mime, 0.1, 2048);
+      if (derived && !derived->empty()) {
+        query_text = o.query.empty() ? *derived : o.query + "\n" + *derived;
+      } else if (o.query.empty()) {
+        std::fprintf(stderr, "chimera: media derivation failed and no --search text given\n");
+        return 1;
+      }
+      auto allow = m.vec_keys_of_modality(modality);
+      if (!allow.empty()) {
+        if (auto mv = llama->embed_media(b64)) {
+          if (auto hits = tvec->query(*mv, o.k, allow))
+            for (const auto& h : *hits)
+              if (auto cid = m.chunk_by_vec_key(h.vec_key))
+                media_ranked.push_back({*cid, h.score});
+        }
+      }
+    }
+  }
+
   // ---- 1. embed the query ----------------------------------------------------
-  auto qe = llama->embed({o.query});
+  auto qe = llama->embed({query_text});
   if (!qe) {
     std::fprintf(stderr, "chimera: query embedding failed\n");
     return 1;
   }
 
   // ---- 2. ANN ------------------------------------------------------------------
-  auto ann = tvec->query((*qe)[0], o.k);
+  // Text-modality vectors only: media vectors live in their own similarity
+  // regime and would pollute a text query's neighborhood.
+  auto text_allow = m.vec_keys_of_modality("text");
+  auto ann = tvec->query((*qe)[0], o.k, text_allow);
   std::vector<std::pair<std::string, double>> vec_ranked;  // chunkID, cosine
   if (ann)
     for (const auto& h : *ann)
@@ -146,7 +192,7 @@ int run_search(const Options& o) {
 
   // ---- 3. keyword ---------------------------------------------------------------
   std::map<std::string, double> kw_scores;  // chunkID → best BM25
-  for (const auto& term : salient_terms(o.query)) {
+  for (const auto& term : salient_terms(query_text)) {
     std::string sparql =
         "PREFIX ch: <chimera://ontology#> "
         "SELECT ?chunk ?ql_score_t_var_text WHERE { "
@@ -181,6 +227,17 @@ int run_search(const Options& o) {
     auto& c = cands[kw_ranked[i].first];
     c.chunk_id = kw_ranked[i].first;
     c.fused += 1.0 / (kRrf + static_cast<double>(i) + 1);
+  }
+  // Same-modality media hits: an ordinal-0 hit stands for its document;
+  // route it to the doc's first text chunk (which carries the derived text).
+  for (size_t i = 0; i < media_ranked.size(); ++i) {
+    std::string cid = media_ranked[i].first;
+    auto colon = cid.rfind(':');
+    if (colon != std::string::npos) cid = cid.substr(0, colon) + ":0001";
+    auto& c = cands[cid];
+    c.chunk_id = cid;
+    c.fused += 1.0 / (kRrf + static_cast<double>(i) + 1);
+    if (c.cosine == 0) c.cosine = media_ranked[i].second;
   }
   std::vector<Candidate> top;
   for (auto& [id, c] : cands) top.push_back(std::move(c));
@@ -318,7 +375,7 @@ int run_search(const Options& o) {
 
   // ---- 7. synthesize ----------------------------------------------------------------
   std::ostringstream ctx;
-  ctx << "QUESTION: " << o.query << "\n\nCONTEXT:\n";
+  ctx << "QUESTION: " << query_text << "\n\nCONTEXT:\n";
   for (size_t i = 0; i < sources.size(); ++i)
     ctx << "[" << i + 1 << "] (" << sources[i].path << "#" << sources[i].ordinal
         << ")\n" << sources[i].text << "\n\n";

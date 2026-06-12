@@ -57,6 +57,35 @@ inline std::string slugify(const std::string& s) {
   return out;
 }
 
+inline std::string base64_encode(const std::string& in) {
+  static const char* k =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve((in.size() + 2) / 3 * 4);
+  size_t i = 0;
+  while (i + 2 < in.size()) {
+    uint32_t v = (uint8_t(in[i]) << 16) | (uint8_t(in[i + 1]) << 8) | uint8_t(in[i + 2]);
+    out.push_back(k[v >> 18]);
+    out.push_back(k[(v >> 12) & 63]);
+    out.push_back(k[(v >> 6) & 63]);
+    out.push_back(k[v & 63]);
+    i += 3;
+  }
+  if (i + 1 == in.size()) {
+    uint32_t v = uint8_t(in[i]) << 16;
+    out.push_back(k[v >> 18]);
+    out.push_back(k[(v >> 12) & 63]);
+    out += "==";
+  } else if (i + 2 == in.size()) {
+    uint32_t v = (uint8_t(in[i]) << 16) | (uint8_t(in[i + 1]) << 8);
+    out.push_back(k[v >> 18]);
+    out.push_back(k[(v >> 12) & 63]);
+    out.push_back(k[(v >> 6) & 63]);
+    out += "=";
+  }
+  return out;
+}
+
 inline std::string chunk_id(const std::string& doc_id, int ordinal) {
   char buf[16];
   std::snprintf(buf, sizeof buf, "%04d", ordinal);

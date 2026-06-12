@@ -39,6 +39,7 @@ struct DocTriples {
   std::vector<std::string> paths;
   int64_t bytes = 0;
   std::string mime;
+  std::string modality = "text";  // emitted as ch:modality when not text
   std::string ingested_at;  // ISO-8601
   int chunk_count = 0;
   std::string superseded_by;  // empty unless superseding

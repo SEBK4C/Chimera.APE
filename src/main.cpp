@@ -17,6 +17,7 @@ namespace {
 
   chimera ingest <dir> [--db P] [--include G]... [--exclude G]... [--paranoid]
   chimera --search "Q" [--db P] [--k N] [--hops N] [--ctx-budget N] [--json]
+  chimera --search-file img.png|clip.wav [--search "Q"] [--db P] [...]
   chimera verify  [--db P] [--fix] [--paranoid]
   chimera status  [--db P]
   chimera vacuum  [--db P]
@@ -49,6 +50,7 @@ int main(int argc, char** argv) {
       return argv[++i];
     };
     if (a == "--search") { cmd = "search"; o.query = need("--search"); }
+    else if (a == "--search-file") { cmd = "search"; o.search_file = need("--search-file"); }
     else if (a == "--db") o.db = need("--db");
     else if (a == "--include") o.include.push_back(need("--include"));
     else if (a == "--exclude") o.exclude.push_back(need("--exclude"));

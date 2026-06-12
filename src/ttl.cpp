@@ -61,6 +61,7 @@ std::string emit_doc(const DocTriples& d) {
   o << "    ch:checksum \"" << d.doc_id << "\" ;\n";
   o << "    ch:bytes " << d.bytes << " ;\n";
   o << "    ch:mime \"" << ttl_escape(d.mime) << "\" ;\n";
+  if (d.modality != "text") o << "    ch:modality \"" << d.modality << "\" ;\n";
   o << "    ch:ingestedAt \"" << d.ingested_at << "\"^^xsd:dateTime";
   for (int i = 1; i <= d.chunk_count; ++i)
     o << " ;\n    ch:hasChunk " << chunk_iri(chunk_id(d.doc_id, i));

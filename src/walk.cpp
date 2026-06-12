@@ -54,8 +54,21 @@ std::string ext_of(const std::string& path) {
 }  // namespace
 
 std::string mime_of(const std::string& path) {
-  auto it = kMime.find(ext_of(path));
+  std::string e = ext_of(path);
+  // Media handled natively by the model (Gemma 4 multimodal pipeline).
+  if (e == "png") return "image/png";
+  if (e == "jpg" || e == "jpeg") return "image/jpeg";
+  if (e == "wav") return "audio/wav";
+  if (e == "mp3") return "audio/mpeg";
+  auto it = kMime.find(e);
   return it != kMime.end() ? it->second : "text/plain";
+}
+
+std::string modality_of(const std::string& path) {
+  std::string e = ext_of(path);
+  if (e == "png" || e == "jpg" || e == "jpeg") return "image";
+  if (e == "wav" || e == "mp3") return "audio";
+  return "text";
 }
 
 namespace {
@@ -211,16 +224,16 @@ void walk(const std::string& root, const WalkOptions& opts,
         if (!hit) continue;
       }
 
-      if (is_binary_ext(rel)) continue;
       {
-        std::ifstream f(de.path(), std::ios::binary);
-        char buf[8192];
-        f.read(buf, sizeof buf);
-        std::streamsize got = f.gcount();
-        if (got > 0 && looks_binary(buf, static_cast<size_t>(got))) continue;
-      }
-
-      {
+        std::string modality = modality_of(rel);
+        if (modality == "text") {
+          if (is_binary_ext(rel)) continue;
+          std::ifstream f(de.path(), std::ios::binary);
+          char buf[8192];
+          f.read(buf, sizeof buf);
+          std::streamsize got = f.gcount();
+          if (got > 0 && looks_binary(buf, static_cast<size_t>(got))) continue;
+        }
         WalkEntry e;
         e.rel_path = rel;
         e.abs_path = de.path().string();
@@ -228,6 +241,7 @@ void walk(const std::string& root, const WalkOptions& opts,
         struct stat st {};
         if (::stat(e.abs_path.c_str(), &st) == 0) e.mtime = st.st_mtime;
         e.mime = mime_of(rel);
+        e.modality = modality;
         cb(e);
       }
     next_entry:;

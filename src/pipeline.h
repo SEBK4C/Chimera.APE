@@ -9,6 +9,7 @@ namespace chimera {
 struct Options {
   std::string dir;          // ingest corpus root
   std::string query;        // --search text
+  std::string search_file;  // --search-file: query by image/audio file
   std::string sparql_text;  // sparql subcommand
   std::string db;           // --db override (else <dir>/.chimera)
   std::string model;        // --model override

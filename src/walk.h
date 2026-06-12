@@ -13,6 +13,7 @@ struct WalkEntry {
   int64_t size = 0;
   int64_t mtime = 0;      // unix seconds
   std::string mime;       // best-effort from extension ("text/plain" fallback)
+  std::string modality = "text";  // text | image | audio
 };
 
 struct WalkOptions {
@@ -36,5 +37,7 @@ void walk(const std::string& root, const WalkOptions& opts,
 bool glob_match(const std::string& pattern, const std::string& path);
 bool looks_binary(const char* data, size_t n);
 std::string mime_of(const std::string& path);
+// "image" / "audio" for natively-embeddable media extensions, else "text".
+std::string modality_of(const std::string& path);
 
 }  // namespace chimera

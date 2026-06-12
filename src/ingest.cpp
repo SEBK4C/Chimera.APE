@@ -51,12 +51,28 @@ struct DocWork {
   std::string doc_id;
   std::string rel_path, abs_path;
   std::string mime;
+  std::string modality = "text";  // image/audio docs derive text via the model
   int64_t size = 0, mtime = 0;
   std::string superseded_old;  // old docID this one replaces, if any
-  std::vector<Chunk> chunks;
+  std::vector<Chunk> chunks;   // for media docs, filled after derivation
 };
 
 constexpr int kEmbedBatch = 16;
+
+// Derivation prompts (user-specified design): images transcribe-or-describe,
+// audio transcribes. The derived text is what the text pipeline indexes; the
+// raw media vector is stored separately for same-modality search (the
+// modality gap makes raw cross-modal cosine useless — see
+// vendor/llamafile-gemma/docs/mm-embedding.md).
+const char* kImageDerivePrompt =
+    "If this image contains readable text, transcribe it verbatim and "
+    "completely. Otherwise, describe the scene concisely but thoroughly: "
+    "name visible objects, people, places, text fragments, and any "
+    "identifiable context. Output only the transcription or description.";
+const char* kAudioDerivePrompt =
+    "Transcribe this audio verbatim and completely. If it is not speech, "
+    "describe the sound concisely (speakers, music, ambience, events). "
+    "Output only the transcription or description.";
 
 }  // namespace
 
@@ -119,6 +135,7 @@ int run_ingest(const Options& o) {
     w.rel_path = e.rel_path;
     w.abs_path = e.abs_path;
     w.mime = e.mime;
+    w.modality = e.modality;
     w.size = e.size;
     w.mtime = e.mtime;
     if (known && known->doc_id != *id) {
@@ -126,10 +143,13 @@ int run_ingest(const Options& o) {
       ++n_superseded;
     }
 
-    auto content = read_file(e.abs_path);
-    if (!content) return;
-    std::string text = e.mime == "text/html" ? strip_html(*content) : *content;
-    w.chunks = chunk_text(text, e.mime);
+    if (w.modality == "text") {
+      auto content = read_file(e.abs_path);
+      if (!content) return;
+      std::string text = e.mime == "text/html" ? strip_html(*content) : *content;
+      w.chunks = chunk_text(text, e.mime);
+    }
+    // Media chunks are derived once the model is up (needs the organ).
     work.push_back(std::move(w));
   });
 
@@ -199,6 +219,38 @@ int run_ingest(const Options& o) {
     if (!w.superseded_old.empty()) m.supersede(w.superseded_old, w.doc_id);
     m.commit();
 
+    // Stage 3b — media derivation + raw-media vector (multimodal docs).
+    std::vector<float> media_vec;
+    if (w.modality != "text") {
+      auto bytes = read_file(w.abs_path);
+      if (!bytes) continue;
+      std::string b64 = base64_encode(*bytes);
+      const char* prompt = w.modality == "image" ? kImageDerivePrompt : kAudioDerivePrompt;
+      auto derived = llama->chat_media(prompt, b64, w.mime, 0.1, 2048);
+      if (!derived || derived->empty()) {
+        std::fprintf(stderr, "  media derivation failed: %s (will retry next run)\n",
+                     w.rel_path.c_str());
+        continue;
+      }
+      w.chunks = chunk_text(*derived, "text/plain");
+      auto mv = llama->embed_media(b64);
+      if (mv) {
+        media_vec = std::move(*mv);
+      } else {
+        // GPU backend refuses media embeddings (501); same-modality vector
+        // search degrades gracefully — derived text still indexes fully.
+        std::fprintf(stderr,
+                     "  note: raw media embedding unavailable for %s "
+                     "(GPU backend?); text bridge only\n",
+                     w.rel_path.c_str());
+      }
+      if (o.verbose)
+        std::fprintf(stderr, "  %s [%s]: derived %zu bytes of text\n",
+                     w.rel_path.c_str(), w.modality.c_str(),
+                     derived->size());
+    }
+    if (w.chunks.empty()) continue;  // nothing extractable
+
     // Stage 4 — embed (batched).
     std::vector<std::vector<float>> vecs;
     vecs.reserve(w.chunks.size());
@@ -229,12 +281,22 @@ int run_ingest(const Options& o) {
     }
     m.set_stage(w.doc_id, Stage::kExtracted);
 
-    // Stage 6 — vectors.
+    // Stage 6 — vectors. Text vectors for every chunk, plus (media docs)
+    // the raw media vector under the reserved ordinal-0 chunkID.
     std::vector<uint64_t> keys;
     for (const auto& ck : w.chunks) keys.push_back(vec_key(chunk_id(w.doc_id, ck.ordinal)));
+    if (!media_vec.empty()) {
+      keys.push_back(vec_key(chunk_id(w.doc_id, 0)));
+      vecs.push_back(media_vec);
+    }
     if (!tvec->upsert(keys, vecs)) {
       std::fprintf(stderr, "  vector upsert failed: %s\n", w.rel_path.c_str());
       continue;
+    }
+    if (!media_vec.empty()) {
+      ChunkRow media_row{chunk_id(w.doc_id, 0), w.doc_id, 0,
+                         vec_key(chunk_id(w.doc_id, 0)), 0, w.size, w.modality};
+      m.insert_chunk(media_row);
     }
     // Supersession: tombstone the old doc's vectors (§2.3 job 2).
     if (!w.superseded_old.empty()) {
@@ -250,6 +312,7 @@ int run_ingest(const Options& o) {
     dt.paths = {w.rel_path};
     dt.bytes = w.size;
     dt.mime = w.mime;
+    dt.modality = w.modality;
     dt.ingested_at = iso8601_now();
     dt.chunk_count = static_cast<int>(w.chunks.size());
     ttl << emit_doc(dt);
