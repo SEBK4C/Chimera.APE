@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 
 #include "nlohmann/json.hpp"
 
@@ -23,7 +24,48 @@ std::string env_or(const char* name, const std::string& fallback) {
 bool exists(const std::string& p) { return !p.empty() && fs::exists(p); }
 }  // namespace
 
+namespace {
+
+// APE binaries are valid ZIP archives; cosmocc exposes embedded assets under
+// the virtual /zip/ path (§1: payloads ride inside the binary). First run
+// extracts them into db/runtime/, version-stamped via a marker file, so
+// children can be exec'd (you cannot exec /zip/... directly).
+void extract_zip_payloads(const std::string& db_dir) {
+  const char* kVersion = "v0.1.0";  // bump to re-extract on upgrade
+  std::string bin = db_dir + "/runtime/bin";
+  std::string stamp = bin + "/.extracted-" + kVersion;
+  if (fs::exists(stamp)) return;
+  if (!fs::exists("/zip/organs")) return;  // dev build: nothing embedded
+  fs::create_directories(bin);
+  for (const auto& f : fs::directory_iterator("/zip/organs")) {
+    std::string dst = bin + "/" + f.path().filename().string();
+    std::ifstream in(f.path(), std::ios::binary);
+    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
+    out << in.rdbuf();
+    out.close();
+    fs::permissions(dst, fs::perms::owner_all | fs::perms::group_read |
+                             fs::perms::others_read);
+  }
+  // Full flavor: weights embedded too (DECISIONS.md D3). 7+ GB copy, once.
+  if (fs::exists("/zip/models")) {
+    std::string mod = db_dir + "/runtime/model";
+    fs::create_directories(mod);
+    for (const auto& f : fs::directory_iterator("/zip/models"))
+      if (f.path().extension() == ".gguf" && !fs::exists(mod + "/model.gguf")) {
+        std::fprintf(stderr, "extracting embedded model weights (one-time, several GB)...\n");
+        std::ifstream in(f.path(), std::ios::binary);
+        std::ofstream out(mod + "/model.gguf", std::ios::binary | std::ios::trunc);
+        out << in.rdbuf();
+        break;
+      }
+  }
+  std::ofstream(stamp) << kVersion;
+}
+
+}  // namespace
+
 RuntimePaths RuntimePaths::resolve(const std::string& db_dir, const std::string& model_flag) {
+  extract_zip_payloads(db_dir);
   RuntimePaths r;
   std::string bin = db_dir + "/runtime/bin/";
   std::string mod = db_dir + "/runtime/model/";
@@ -91,9 +133,11 @@ std::optional<std::string> LlamaClient::chat(const std::string& system,
     json j = json::parse(resp->body);
     const auto& msg = j.at("choices").at(0).at("message");
     std::string content = msg.value("content", "");
-    // Gemma 4 emits its thinking into reasoning_content; content can be
-    // empty if max_tokens is exhausted mid-think. Return content only —
-    // callers size max_tokens generously.
+    if (msg.contains("content") && msg.at("content").is_null()) content = "";
+    // Gemma 4 emits its thinking into reasoning_content; if max_tokens runs
+    // out mid-think, content is empty but the reasoning often already
+    // contains the requested output — salvage it rather than failing.
+    if (content.empty()) content = msg.value("reasoning_content", "");
     return content;
   } catch (const std::exception&) {
     return std::nullopt;
