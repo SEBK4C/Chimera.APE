@@ -29,7 +29,9 @@ cp "$CHIMERA" "$OUT/chimera.ape"
 if [ "${1:-}" = "--full" ]; then
   cp "$OUT/chimera.ape" "$OUT/chimera-full.ape"
   (cd "$ROOT/vendor/llamafile-gemma" && \
-    "$ZIPALIGN" -j0 "$OUT/chimera-full.ape" models/gemma-4-12b-it-qat-q4_0.gguf)
+    "$ZIPALIGN" -j0 "$OUT/chimera-full.ape" \
+      models/gemma-4-12b-it-qat-q4_0.gguf \
+      models/mmproj-gemma-4-12b-it-qat-q4_0.gguf)
   echo "built: $OUT/chimera-full.ape ($(du -h "$OUT/chimera-full.ape" | cut -f1))"
 fi
 

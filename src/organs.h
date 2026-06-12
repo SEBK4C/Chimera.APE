@@ -17,6 +17,8 @@ namespace chimera {
 struct RuntimePaths {
   std::string llamafile;      // llamafile server binary
   std::string model;          // GGUF weights
+  std::string mmproj;         // multimodal projector GGUF (optional: empty =
+                              // text-only; media derivation/embedding off)
   std::string qlever_server;
   std::string qlever_index;   // index *builder* binary
   std::string turbovec;

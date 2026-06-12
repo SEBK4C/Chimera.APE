@@ -54,16 +54,19 @@ void extract_zip_payloads(const std::string& db_dir) {
     fs::permissions(dst, fs::perms::owner_all | fs::perms::group_read |
                              fs::perms::others_read);
   }
-  // Full flavor: weights embedded too (DECISIONS.md D3). 7+ GB copy, once.
+  // Full flavor: weights (+ multimodal projector) embedded too (D3).
   std::string mod = db_dir + "/runtime/model";
   for (const auto& f : fs::directory_iterator("/zip")) {
-    if (f.path().extension() != ".gguf" || fs::exists(mod + "/model.gguf")) continue;
-    std::fprintf(stderr, "extracting embedded model weights (one-time, several GB)...\n");
+    if (f.path().extension() != ".gguf") continue;
+    bool is_mmproj = f.path().filename().string().rfind("mmproj", 0) == 0;
+    std::string dst = mod + (is_mmproj ? "/mmproj.gguf" : "/model.gguf");
+    if (fs::exists(dst)) continue;
+    std::fprintf(stderr, "extracting embedded %s (one-time)...\n",
+                 is_mmproj ? "projector" : "model weights (several GB)");
     fs::create_directories(mod);
     std::ifstream in(f.path(), std::ios::binary);
-    std::ofstream out(mod + "/model.gguf", std::ios::binary | std::ios::trunc);
+    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
     out << in.rdbuf();
-    break;
   }
   std::ofstream(stamp) << kVersion;
 }
@@ -81,6 +84,15 @@ RuntimePaths RuntimePaths::resolve(const std::string& db_dir, const std::string&
   r.turbovec = env_or("CHIMERA_TURBOVEC", bin + "turbovec-server");
   r.model = !model_flag.empty() ? model_flag
                                 : env_or("CHIMERA_MODEL", mod + "model.gguf");
+  // The projector enables image/audio understanding. Look beside the model
+  // for the conventional mmproj-<model>.gguf, then the runtime dir.
+  r.mmproj = env_or("CHIMERA_MMPROJ", "");
+  if (r.mmproj.empty() && !r.model.empty()) {
+    fs::path mp = fs::path(r.model).parent_path() /
+                  ("mmproj-" + fs::path(r.model).filename().string());
+    if (fs::exists(mp)) r.mmproj = mp.string();
+  }
+  if (r.mmproj.empty() && fs::exists(mod + "mmproj.gguf")) r.mmproj = mod + "mmproj.gguf";
   return r;
 }
 
@@ -299,6 +311,10 @@ LlamaClient* Organs::llama() {
       paths_.llamafile, "--server", "-m", paths_.model,
       "--embeddings", "--pooling", "mean", "-c", "8192", "-np", "2",
       "--host", "127.0.0.1", "--port", std::to_string(port)};
+  if (!paths_.mmproj.empty()) {
+    argv.push_back("--mmproj");
+    argv.push_back(paths_.mmproj);
+  }
   if (!llama_child_.spawn(argv, db_dir_ + "/logs/llamafile.log")) {
     error_ = "llamafile spawn: " + llama_child_.error();
     return nullptr;
