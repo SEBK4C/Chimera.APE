@@ -57,5 +57,7 @@ docs/DECISIONS.md     Appendix-C resolutions with evidence
 - [x] Supervisor + organ HTTP clients
 - [x] Ingest pipeline (sequential v1; bounded-queue concurrency is Phase 2)
 - [x] Search pipeline: ANN + BM25 → RRF → graph crawl → synthesis → ✓ verification
-- [ ] Zip-store payload packaging + first-run extraction
-- [ ] §11 acceptance sweep (Linux/macOS/Windows)
+- [x] Multimodal: image/audio ingestion (transcribe-or-describe + raw media
+      vectors) and `--search-file` query-by-example — see [docs/USAGE.md](docs/USAGE.md)
+- [x] Zip-store payload packaging + first-run extraction (`scripts/package.sh`)
+- [ ] §11 acceptance: Linux x86_64 sweep in progress; macOS/Windows pending
