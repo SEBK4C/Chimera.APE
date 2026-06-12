@@ -104,9 +104,17 @@ int run_ingest(const Options& o) {
   WalkOptions wo;
   wo.include = o.include;
   wo.exclude = o.exclude;
+  // A path is only safely skippable if its document actually finished the
+  // pipeline — otherwise a doc that failed mid-stage (or died with the
+  // process) would be path-fast-skipped forever.
+  auto fully_ingested = [&](const std::string& doc_id) {
+    auto st = m.stage_of(doc_id);
+    return st && *st >= static_cast<int>(Stage::kCommitted);
+  };
   walk(root, wo, [&](const WalkEntry& e) {
     auto known = m.path_info(e.rel_path);
-    if (known && known->mtime == e.mtime && known->size == e.size) {
+    if (known && known->mtime == e.mtime && known->size == e.size &&
+        fully_ingested(known->doc_id)) {
       ++n_skipped;
       return;
     }
@@ -115,12 +123,12 @@ int run_ingest(const Options& o) {
       std::fprintf(stderr, "  unreadable: %s\n", e.rel_path.c_str());
       return;
     }
-    if (known && known->doc_id == *id) {
-      m.upsert_path(e.rel_path, e.mtime, e.size, *id);
+    if (known && known->doc_id == *id && fully_ingested(*id)) {
+      m.upsert_path(e.rel_path, e.mtime, e.size, *id);  // touched, unchanged
       ++n_skipped;
       return;
     }
-    if (m.has_doc(*id)) {
+    if (m.has_doc(*id) && fully_ingested(*id)) {
       // Dedup across paths (§2.3 job 1): one Document, many locatedAt.
       m.upsert_path(e.rel_path, e.mtime, e.size, *id);
       std::ofstream ttl(db_dir + "/staging/pending.ttl", std::ios::app);
