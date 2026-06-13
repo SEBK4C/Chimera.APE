@@ -13,6 +13,7 @@ struct Options {
   std::string sparql_text;  // sparql subcommand
   std::string db;           // --db override (else <dir>/.chimera)
   std::string model;        // --model override
+  std::string gpu = "auto"; // --gpu auto|off|N|vendor (llamafile offload)
   std::vector<std::string> include, exclude;
   bool paranoid = false;
   bool fix = false;

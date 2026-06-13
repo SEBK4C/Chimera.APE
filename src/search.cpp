@@ -116,7 +116,7 @@ int run_search(const Options& o) {
     std::fprintf(stderr, "chimera: missing runtime piece: %s\n", miss->c_str());
     return 1;
   }
-  Organs organs(paths, db_dir);
+  Organs organs(paths, db_dir, o.gpu);
   std::fprintf(stderr, "starting organs...\n");
   LlamaClient* llama = organs.llama();
   TurboVecClient* tvec = llama ? organs.turbovec() : nullptr;
@@ -538,7 +538,7 @@ int run_vacuum(const Options& o) {
   m.open(db_dir + "/manifest.db");
 
   RuntimePaths paths = RuntimePaths::resolve(db_dir, o.model);
-  Organs organs(paths, db_dir);
+  Organs organs(paths, db_dir, o.gpu);
 
   // 1. Drop superseded docs' vectors (tombstoned already at supersession;
   //    re-remove is a no-op) and manifest rows.
@@ -614,7 +614,7 @@ int run_vacuum(const Options& o) {
 int run_sparql(const Options& o) {
   std::string db_dir = resolve_db_dir(o);
   RuntimePaths paths = RuntimePaths::resolve(db_dir, o.model);
-  Organs organs(paths, db_dir);
+  Organs organs(paths, db_dir, o.gpu);
   QleverClient* q = organs.qlever();
   if (!q) {
     std::fprintf(stderr, "chimera: %s\n", organs.last_error().c_str());

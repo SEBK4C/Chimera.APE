@@ -185,7 +185,7 @@ int run_ingest(const Options& o) {
     std::fprintf(stderr, "chimera: missing runtime piece: %s\n", miss->c_str());
     return 1;
   }
-  Organs organs(paths, db_dir);
+  Organs organs(paths, db_dir, o.gpu);
   std::fprintf(stderr, "starting model server (first load can take minutes)...\n");
   LlamaClient* llama = organs.llama();
   if (!llama) {

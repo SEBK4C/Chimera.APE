@@ -344,6 +344,26 @@ LlamaClient* Organs::llama() {
     argv.push_back("--mmproj");
     argv.push_back(paths_.mmproj);
   }
+  // GPU offload (§8 --gpu). Without -ngl, llamafile keeps every layer on the
+  // CPU even when a GPU is present — so "auto" must explicitly offload.
+  bool all_digits = !gpu_.empty() &&
+      gpu_.find_first_not_of("0123456789") == std::string::npos;
+  if (gpu_ == "off" || gpu_ == "disable") {
+    argv.push_back("--gpu");
+    argv.push_back("disable");
+  } else if (gpu_.empty() || gpu_ == "auto") {
+    argv.push_back("-ngl");
+    argv.push_back("999");  // offload all; llamafile falls back to CPU if none
+  } else if (all_digits) {
+    argv.push_back("-ngl");
+    argv.push_back(gpu_);   // partial offload of N layers (VRAM-limited)
+  } else {
+    // vendor string: nvidia | amd | apple
+    argv.push_back("--gpu");
+    argv.push_back(gpu_);
+    argv.push_back("-ngl");
+    argv.push_back("999");
+  }
   if (!llama_child_.spawn(argv, db_dir_ + "/logs/llamafile.log")) {
     error_ = "llamafile spawn: " + llama_child_.error();
     return nullptr;

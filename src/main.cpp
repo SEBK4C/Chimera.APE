@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
     else if (a == "--model") o.model = need("--model");
     else if (a == "--verbose") o.verbose = true;
     else if (a == "--threads") (void)need("--threads");  // accepted; sequential v1
-    else if (a == "--gpu") (void)need("--gpu");          // accepted; CPU v1
+    else if (a == "--gpu") o.gpu = need("--gpu");        // auto|off|N|vendor
     else if (a == "--version") { std::puts("chimera 0.1.0-dev"); return 0; }
     else if (a == "--help" || a == "-h") usage(0);
     else if (!a.empty() && a[0] == '-') {

@@ -20,7 +20,9 @@ leaves your machine.
    - **CPU-only is fully supported but slow** (~7 tok/s on a fast Xeon):
      budget *minutes per document* at ingest. Keep CPU corpora to a few
      hundred files.
-   - GPU (`--gpu auto`, NVIDIA/Metal) makes ingest interactive. One caveat:
+   - GPU (`--gpu auto`, NVIDIA/Metal) makes ingest interactive — see
+    [docs/GPU.md](GPU.md) for CUDA setup and the one media-embedding caveat.
+    One caveat:
      raw media *embeddings* are CPU-only for now (the server politely
      refuses on GPU; image/audio search degrades to the text bridge, which
      is the primary path anyway).
@@ -97,7 +99,8 @@ superseded; superseded data stays queryable until `vacuum`.
 --hops N         graph expansion depth (default 1)
 --ctx-budget N   synthesis context tokens (default 8192)
 --include G / --exclude G    ingest glob filters
---threads N / --gpu auto|off|N    accepted; full effect lands post-alpha
+--gpu auto|off|N|nvidia    GPU offload for the model — see docs/GPU.md
+--threads N                accepted; sequential ingest lands post-alpha
 --json           machine-readable search output (full trace)
 ```
 

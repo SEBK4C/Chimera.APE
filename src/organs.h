@@ -94,8 +94,11 @@ class TurboVecClient {
 // it needs). Start methods are idempotent.
 class Organs {
  public:
-  Organs(RuntimePaths paths, std::string db_dir)
-      : paths_(std::move(paths)), db_dir_(std::move(db_dir)) {}
+  // gpu: "auto" (offload all layers, llamafile auto-detects vendor / falls
+  // back to CPU), "off" (force CPU), an integer N (offload N layers — for
+  // VRAM-limited cards), or a llamafile vendor string ("nvidia"/"amd"/"apple").
+  Organs(RuntimePaths paths, std::string db_dir, std::string gpu = "auto")
+      : paths_(std::move(paths)), db_dir_(std::move(db_dir)), gpu_(std::move(gpu)) {}
 
   // Each returns nullptr on failure with the reason in last_error().
   LlamaClient* llama();          // starts llamafile (slow: model load)
@@ -115,6 +118,7 @@ class Organs {
  private:
   RuntimePaths paths_;
   std::string db_dir_;
+  std::string gpu_;
   std::string error_;
   Child llama_child_, qlever_child_, turbovec_child_;
   std::unique_ptr<LlamaClient> llama_client_;

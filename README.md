@@ -15,8 +15,10 @@ graph-vector database; ask it a question and it answers with synthesized,
 cited, checksum-verified provenance.
 
 The full specification is [prompt.md](prompt.md); resolved design decisions
-are in [docs/DECISIONS.md](docs/DECISIONS.md). Read §2 of the prompt twice —
-the chunkID spine is the architectural soul of the project.
+are in [docs/DECISIONS.md](docs/DECISIONS.md). Usage is in
+[docs/USAGE.md](docs/USAGE.md); running/building on a CUDA GPU is in
+[docs/GPU.md](docs/GPU.md). Read §2 of the prompt twice — the chunkID spine is
+the architectural soul of the project.
 
 ## Quick start (dev)
 
