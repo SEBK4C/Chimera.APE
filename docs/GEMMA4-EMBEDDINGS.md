@@ -61,16 +61,29 @@ So the GPU failure is not "media embeddings can't work on GPU." It is "the
 *dedicated pooled-embeddings graph* is the wrong tool." The right tool — the
 projector+interleave forward pass — already works on GPU.
 
-## State of the chimera implementation
+## How chimera implements it (branch `GPU-mm-embed-patch`, 2026-06-13)
 
-- `src/organs.cpp:LlamaClient::embed_media()` currently uses the dedicated
-  `/v1/embeddings` media graph (the wrong path above). On GPU
-  `src/ingest.cpp` skips it (`Organs::model_on_gpu()`), so a media corpus still
-  ingests via its derived text instead of crashing. **This is a stopgap, not
-  the design.**
-- **Target:** embed media (and text) via the interleave+end-state path. That
-  needs llamafile to expose the final hidden state from the chat/interleave
-  forward pass (or an embeddings endpoint that runs the *interleave* graph
-  rather than the dedicated embd-input graph). Track this against the
-  llamafile-gemma repo; when it lands, route `embed`/`embed_media` through it
-  and drop the GPU skip.
+The end-state path is the LAST-pooling hidden state, and it is now wired:
+
+- **llamafile patch** —
+  `patches/0015-gpu-media-embeddings-last-pooling.patch` in the llamafile-gemma
+  repo. `LAST` pooling no longer forces *all* tokens to be outputs
+  (`output_all` in `src/llama-context.cpp`), so a media decode outputs only the
+  final token — like generation, which is GPU-safe. The embedding becomes the
+  model's end hidden state over the interleaved sequence. patch-0009's GPU
+  refusal is relaxed for LAST pooling (mean/cls still force all-outputs and stay
+  refused on GPU). Rebuild llamafile after applying.
+- **chimera** — starts the embed server with `--pooling last` and a 2048 ubatch
+  (`src/organs.cpp`) and always calls `embed`/`embed_media`; the GPU skip is
+  gone (`src/ingest.cpp`). Text, image and audio all embed as the end state of
+  the interleave pass, in one shared 3840-d space, on GPU.
+
+Verified on 2× RTX 4090 / CUDA 12.8: a 2-image + audio + text corpus ingests to
+**7 vectors** (4 text chunks + 3 raw media vectors) on `--gpu auto`, and
+`--search-file <image>` returns the matching image (`✓ verified`) via raw-vector
+similarity. Direct llamafile check: text/image/audio embeddings all return
+HTTP 200, dim 3840, norm 1.0, server stays up.
+
+Note: the embedding space is now **LAST-pooled** (was mean). Re-ingest existing
+corpora; dimensionality (3840) is unchanged. The embedded llamafile must carry
+patch 0015 (the packaged APE does, via `scripts/package.sh`).

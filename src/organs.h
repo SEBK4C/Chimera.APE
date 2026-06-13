@@ -105,13 +105,6 @@ class Organs {
   QleverClient* qlever();        // starts qlever-server on db/qlever/chimera.*
   TurboVecClient* turbovec();    // starts turbovec-server on db/turbovec/index.tvim
 
-  // True if the running model server offloaded to a GPU. Gemma 4's media
-  // embedding crashes the GPU backend (the 501 it returns wedges the server
-  // for every later embed/chat), so ingest skips the raw-media-vector path
-  // when this is true — see docs/GPU.md. Reads the model server's own log;
-  // call only after llama() has started.
-  bool model_on_gpu() const;
-
   // True if a QLever index has been built (server can start).
   bool qlever_index_exists() const;
   // Run the index builder over a Turtle file (initial bulk load, §5 stage 7).

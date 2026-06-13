@@ -45,25 +45,22 @@ first `ingest` will log the GPU it found and the offload count in
 
 Gemma 4 12B is a **dense, natively-multimodal** model — the right way to embed
 image/audio is to reuse its inference forward pass (projector + interleave) and
-take the **end hidden state**, *not* a separate pooled-embeddings graph. See
-[GEMMA4-EMBEDDINGS.md](GEMMA4-EMBEDDINGS.md) — read it before changing the embed
-path.
+take the **end hidden state** via `LAST` pooling, *not* a separate pooled
+(mean/cls) embeddings graph. See [GEMMA4-EMBEDDINGS.md](GEMMA4-EMBEDDINGS.md).
 
-What chimera does **today** is the older, dedicated path
-(`/v1/embeddings` with `{prompt_string, multimodal_data}`), which **crashes the
-GPU backend** (the dedicated embd-input graph segfaults on CUDA/Metal —
-reproduced here on 2× RTX 4090; the request kills the server). So on GPU the
-orchestrator **skips the raw-media-vector call** (`Organs::model_on_gpu()`):
+Chimera embeds via that end-state path on GPU (branch `GPU-mm-embed-patch`): the
+embed server runs `--pooling last` with a patched llamafile (patch 0015) that
+lets LAST-pooling media decodes output only the final token — GPU-safe, unlike
+mean/cls which force *all* tokens to be outputs and segfault the GPU media decode.
 
-- **Text** embeddings, **chat**, and image/audio **chat** (transcribe/describe)
-  all run on GPU; media docs **index fully via their derived text** (the
-  primary retrieval path), so text→media search and `--search-file` work
-  through the text bridge.
-- The **raw same-modality media vector** isn't produced on GPU yet. For it now,
-  run that ingest with `--gpu off` (the dedicated path works on CPU).
+- **Text, image and audio** all embed as the end state of the interleave pass,
+  in one shared 3840-d space, on GPU. Raw same-modality media vectors are
+  produced, so `--search-file` (image→image, audio→audio) works on GPU.
+- The model's **chat** path (transcribe/describe) also runs on GPU, so media
+  docs additionally index via their derived text (the primary retrieval path).
 
-This GPU skip is a **stopgap**. The real fix is the interleave+end-state path,
-which already runs fine on GPU (chat-with-media does) — see GEMMA4-EMBEDDINGS.md.
+(mean/cls pooling still can't embed media on GPU — they force all-outputs and
+crash — so `--pooling last` is the supported path. CPU is unrestricted.)
 
 ## Building on the GPU box
 

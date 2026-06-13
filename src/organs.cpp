@@ -334,11 +334,17 @@ LlamaClient* Organs::llama() {
   if (llama_client_) return llama_client_.get();
   int port = pick_port();
   fs::create_directories(db_dir_ + "/logs");
-  // Flag set mirrors the tested gemma4.args from the llamafile-gemma repo:
-  // one instance, chat + embeddings (--embeddings + --pooling mean).
+  // One instance serves chat + embeddings. Pooling is LAST: the embedding is
+  // the model's end hidden state over the interleaved (projector) token
+  // sequence — Gemma 4 12B's native multimodal embedding. LAST pooling is also
+  // the only GPU-safe path for media embeddings (mean/cls force all-outputs,
+  // which segfaults the GPU media decode; LAST outputs only the final token).
+  // Needs the patched llamafile + -ub large enough to hold a media input in one
+  // ubatch (pooled prompts cannot split). See docs/GEMMA4-EMBEDDINGS.md.
   std::vector<std::string> argv{
       paths_.llamafile, "--server", "-m", paths_.model,
-      "--embeddings", "--pooling", "mean", "-c", "8192", "-np", "2",
+      "--embeddings", "--pooling", "last", "-c", "8192", "-np", "2",
+      "-b", "2048", "-ub", "2048",
       "--host", "127.0.0.1", "--port", std::to_string(port)};
   if (!paths_.mmproj.empty()) {
     argv.push_back("--mmproj");
@@ -375,23 +381,6 @@ LlamaClient* Organs::llama() {
   }
   llama_client_ = std::make_unique<LlamaClient>(port);
   return llama_client_.get();
-}
-
-bool Organs::model_on_gpu() const {
-  // The model server logs the device(s) it loaded on. Treat "a GPU device is
-  // present and there was no CPU-fallback notice" as on-GPU. off/disable and
-  // an explicit 0-layer offload are CPU by construction. Conservative: any
-  // doubt resolves to false, so the raw-media-vector path still runs (it is
-  // only unsafe on the GPU backend).
-  if (gpu_ == "off" || gpu_ == "disable" || gpu_ == "0") return false;
-  std::ifstream in(db_dir_ + "/logs/llamafile.log");
-  if (!in) return false;
-  std::string log((std::istreambuf_iterator<char>(in)),
-                  std::istreambuf_iterator<char>());
-  if (log.find("no usable GPU") != std::string::npos) return false;  // fell back to CPU
-  return log.find("CUDA") != std::string::npos ||
-         log.find("Metal") != std::string::npos ||
-         log.find("ROCm") != std::string::npos;
 }
 
 bool Organs::qlever_index_exists() const {
