@@ -377,6 +377,23 @@ LlamaClient* Organs::llama() {
   return llama_client_.get();
 }
 
+bool Organs::model_on_gpu() const {
+  // The model server logs the device(s) it loaded on. Treat "a GPU device is
+  // present and there was no CPU-fallback notice" as on-GPU. off/disable and
+  // an explicit 0-layer offload are CPU by construction. Conservative: any
+  // doubt resolves to false, so the raw-media-vector path still runs (it is
+  // only unsafe on the GPU backend).
+  if (gpu_ == "off" || gpu_ == "disable" || gpu_ == "0") return false;
+  std::ifstream in(db_dir_ + "/logs/llamafile.log");
+  if (!in) return false;
+  std::string log((std::istreambuf_iterator<char>(in)),
+                  std::istreambuf_iterator<char>());
+  if (log.find("no usable GPU") != std::string::npos) return false;  // fell back to CPU
+  return log.find("CUDA") != std::string::npos ||
+         log.find("Metal") != std::string::npos ||
+         log.find("ROCm") != std::string::npos;
+}
+
 bool Organs::qlever_index_exists() const {
   return fs::exists(db_dir_ + "/qlever/chimera.index.pso");
 }

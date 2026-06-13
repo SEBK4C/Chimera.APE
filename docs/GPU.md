@@ -43,20 +43,25 @@ first `ingest` will log the GPU it found and the offload count in
 
 ### Multimodal embeddings on GPU — the one caveat
 
-Gemma 4's **media embedding** path crashes the GPU backend, so the vendored
-llamafile (patch 0009) refuses media on `/v1/embeddings` with HTTP 501 when
-running on GPU. Consequence:
+Gemma 4's **raw media embedding** path destabilizes the llamafile GPU backend:
+the `/v1/embeddings` call with `multimodal_data` returns HTTP 501 *and* wedges
+the server, so every subsequent embed/chat in the same run fails too — a single
+image would otherwise sink the whole ingest (text docs included). The
+orchestrator therefore **detects the GPU backend and skips the raw-media-vector
+call entirely** on GPU (you'll see `note: GPU backend — raw media vectors
+disabled (text bridge only)`). Consequence:
 
 - **Text** embeddings, **chat**, and image/audio **chat** (transcribe/describe)
-  all work fine on GPU.
+  all work on GPU; media docs **index fully via their derived text** (the
+  primary retrieval path), so text→media search and `--search-file` work
+  through the text bridge.
 - **Raw media vectors** (the ordinal-0 same-modality search vector) are not
-  produced on GPU — chimera logs a note and the media doc still indexes fully
-  via its derived text (the primary retrieval path). `--search-file` then
-  relies on the text bridge rather than raw-vector similarity.
+  produced on GPU. If you specifically want them, run that ingest with
+  `--gpu off` (media embedding works on CPU).
 
-If you specifically want raw media vectors, run that ingest with `--gpu off`
-(media embedding works on CPU). This is an upstream llama.cpp/Gemma-4 GPU bug,
-not a chimera one; revisit when the vendored llamafile picks up a fix.
+This is an upstream llama.cpp/Gemma-4 GPU bug, not a chimera one; the
+orchestrator side-steps it by not issuing the call on GPU. Revisit when the
+vendored llamafile picks up a fix.
 
 ## Building on the GPU box
 
@@ -128,6 +133,11 @@ offloads Gemma 4 12B across both cards and runs the full pipeline:
   weights, ingests in **~55 s**, `--search` answers with a `✓ verified` citation.
 - **`chimera.ape`** (organs embedded, weights via `--model`): ingests on GPU in
   **~29 s** (warm model cache).
+- **Multimodal corpus** (two PNGs + a WAV + a Markdown note): ingests on GPU in
+  **~60 s → 4 chunks**, each media doc indexed via its derived text (banner
+  image OCR'd to "PHOENIX BUDGET 480K", audio + scene described). A text query
+  then answers **"480K"** citing `banner.png#1 ✓ verified` — image retrieval
+  through the text bridge, end-to-end on GPU.
 
 Raw media embeddings remain CPU-only per the §"one caveat" above (use
 `--gpu off` for that ingest); text/chat/vision-describe all run on GPU.

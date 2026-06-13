@@ -215,6 +215,17 @@ int run_ingest(const Options& o) {
   }
   if (o.verbose) std::fprintf(stderr, "embedding dim: %d\n", dim);
 
+  // Gemma 4's raw media embedding crashes the GPU backend: the 501 the server
+  // returns wedges it for every subsequent embed/chat, so a single media file
+  // would otherwise sink the whole run (text docs included). On GPU we skip
+  // the raw-media-vector entirely — the derived text still indexes via the
+  // text bridge (the primary retrieval path). CPU keeps the raw vector.
+  const bool media_vectors_on = !organs.model_on_gpu();
+  if (!media_vectors_on)
+    std::fprintf(stderr,
+                 "note: GPU backend — raw media vectors disabled (text bridge "
+                 "only); use --gpu off to index raw media vectors\n");
+
   // ---- Stages 4–6 per document ----------------------------------------------
   std::string run_ttl_path =
       db_dir + "/staging/run-" + std::to_string(::getpid()) + ".ttl";
@@ -249,16 +260,20 @@ int run_ingest(const Options& o) {
         continue;
       }
       w.chunks = chunk_text(*derived, "text/plain");
-      auto mv = llama->embed_media(b64);
-      if (mv) {
-        media_vec = std::move(*mv);
-      } else {
-        // GPU backend refuses media embeddings (501); same-modality vector
-        // search degrades gracefully — derived text still indexes fully.
-        std::fprintf(stderr,
-                     "  note: raw media embedding unavailable for %s "
-                     "(GPU backend?); text bridge only\n",
-                     w.rel_path.c_str());
+      // Skip the raw-media-vector on GPU (see media_vectors_on above): issuing
+      // it there 501s and wedges the server. On CPU it is produced normally.
+      if (media_vectors_on) {
+        auto mv = llama->embed_media(b64);
+        if (mv) {
+          media_vec = std::move(*mv);
+        } else {
+          // CPU path but the server still refused — degrade to the text
+          // bridge rather than failing the doc.
+          std::fprintf(stderr,
+                       "  note: raw media embedding unavailable for %s; "
+                       "text bridge only\n",
+                       w.rel_path.c_str());
+        }
       }
       if (o.verbose)
         std::fprintf(stderr, "  %s [%s]: derived %zu bytes of text\n",
