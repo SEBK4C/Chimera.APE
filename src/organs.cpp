@@ -17,91 +17,120 @@ using nlohmann::json;
 namespace chimera {
 
 namespace {
-std::string env_or(const char* name, const std::string& fallback) {
+std::string env_str(const char* name) {
   const char* v = std::getenv(name);
-  return v && *v ? v : fallback;
+  return v && *v ? std::string(v) : std::string();
 }
-bool exists(const std::string& p) { return !p.empty() && fs::exists(p); }
+// A real (non-/zip) file present and non-empty. Used for db_dir paths, where
+// std::filesystem works normally.
+bool file_nonempty(const std::string& p) {
+  if (p.empty()) return false;
+  std::error_code ec;
+  auto sz = fs::file_size(p, ec);
+  return !ec && sz > 0;
+}
 }  // namespace
 
 namespace {
 
-// APE binaries are valid ZIP archives; cosmocc exposes embedded assets under
-// the virtual /zip/ path (§1: payloads ride inside the binary). First run
-// extracts them into db/runtime/, version-stamped via a marker file, so
-// children can be exec'd (you cannot exec /zip/... directly).
-void extract_zip_payloads(const std::string& db_dir) {
-  const char* kVersion = "v0.1.0";  // bump to re-extract on upgrade
-  std::string bin = db_dir + "/runtime/bin";
-  std::string stamp = bin + "/.extracted-" + kVersion;
-  if (fs::exists(stamp)) return;
-  // zipalign junks directory prefixes, so payloads sit at the /zip root
-  // under their well-known names.
-  static const char* kOrgans[] = {"llamafile", "qlever-server", "qlever-index",
-                                  "turbovec-server"};
-  bool any = false;
-  for (const char* name : kOrgans) any = any || fs::exists(std::string("/zip/") + name);
-  if (!any) return;  // dev build: nothing embedded
-  fs::create_directories(bin);
-  for (const char* name : kOrgans) {
-    std::string src = std::string("/zip/") + name;
-    if (!fs::exists(src)) continue;
-    std::string dst = bin + "/" + name;
-    std::ifstream in(src, std::ios::binary);
-    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
-    out << in.rdbuf();
-    out.close();
-    fs::permissions(dst, fs::perms::owner_all | fs::perms::group_read |
-                             fs::perms::others_read);
+// Copy one embedded asset /zip/<zip_name> to dst, if present.
+//
+// Access is via std::ifstream (i.e. fopen/open), the ONLY zipos path wired on
+// every host OS. `fs::exists` and `directory_iterator` over /zip are NOT
+// reliable across OSes (they work on Linux but silently report nothing on
+// macOS), which is why an earlier build couldn't find its own llamafile on a
+// Mac. Idempotent: skips when dst already exists and is non-empty.
+// Returns true if dst exists afterward.
+bool extract_one(const std::string& zip_name, const std::string& dst,
+                 const char* human, bool make_executable) {
+  if (file_nonempty(dst)) return true;
+  std::ifstream in(std::string("/zip/") + zip_name, std::ios::binary);
+  if (!in.good()) return false;  // not embedded (e.g. the lean/dev build)
+  if (human) std::fprintf(stderr, "extracting embedded %s (one-time)...\n", human);
+  fs::create_directories(fs::path(dst).parent_path());
+  std::string tmp = dst + ".part";
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    out << in.rdbuf();  // assets are always non-empty, so no failbit footgun
   }
-  // Full flavor: weights (+ multimodal projector) embedded too (D3).
-  std::string mod = db_dir + "/runtime/model";
-  for (const auto& f : fs::directory_iterator("/zip")) {
-    if (f.path().extension() != ".gguf") continue;
-    bool is_mmproj = f.path().filename().string().rfind("mmproj", 0) == 0;
-    std::string dst = mod + (is_mmproj ? "/mmproj.gguf" : "/model.gguf");
-    if (fs::exists(dst)) continue;
-    std::fprintf(stderr, "extracting embedded %s (one-time)...\n",
-                 is_mmproj ? "projector" : "model weights (several GB)");
-    fs::create_directories(mod);
-    std::ifstream in(f.path(), std::ios::binary);
-    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
-    out << in.rdbuf();
+  std::error_code ec;
+  fs::rename(tmp, dst, ec);
+  if (ec) {
+    fs::remove(tmp, ec);
+    return false;
   }
-  std::ofstream(stamp) << kVersion;
+  auto perms = fs::perms::owner_read | fs::perms::owner_write |
+               fs::perms::group_read | fs::perms::others_read;
+  if (make_executable)
+    perms |= fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec;
+  fs::permissions(dst, perms, ec);
+  return file_nonempty(dst);
+}
+
+// Try each candidate /zip name in order; first that extracts wins.
+bool extract_first(std::initializer_list<const char*> zip_names,
+                   const std::string& dst, const char* human, bool exe) {
+  if (file_nonempty(dst)) return true;
+  for (const char* n : zip_names)
+    if (extract_one(n, dst, human, exe)) return true;
+  return false;
 }
 
 }  // namespace
 
 RuntimePaths RuntimePaths::resolve(const std::string& db_dir, const std::string& model_flag) {
-  extract_zip_payloads(db_dir);
-  RuntimePaths r;
   std::string bin = db_dir + "/runtime/bin/";
   std::string mod = db_dir + "/runtime/model/";
-  r.llamafile = env_or("CHIMERA_LLAMAFILE", bin + "llamafile");
-  r.qlever_server = env_or("CHIMERA_QLEVER_SERVER", bin + "qlever-server");
-  r.qlever_index = env_or("CHIMERA_QLEVER_INDEX", bin + "qlever-index");
-  r.turbovec = env_or("CHIMERA_TURBOVEC", bin + "turbovec-server");
-  r.model = !model_flag.empty() ? model_flag
-                                : env_or("CHIMERA_MODEL", mod + "model.gguf");
-  // The projector enables image/audio understanding. Look beside the model
-  // for the conventional mmproj-<model>.gguf, then the runtime dir.
-  r.mmproj = env_or("CHIMERA_MMPROJ", "");
+
+  // 1. Internals first (the user's rule): extract whatever this binary
+  //    carries into the runtime dir. Each is a no-op once present.
+  extract_one("llamafile", bin + "llamafile", nullptr, /*exe=*/true);
+  extract_one("qlever-server", bin + "qlever-server", nullptr, true);
+  extract_one("qlever-index", bin + "qlever-index", nullptr, true);
+  extract_one("turbovec-server", bin + "turbovec-server", nullptr, true);
+  // Weights (full flavor). Names are canonical now; older packs junked the
+  // gguf basename, so accept those too.
+  extract_first({"model.gguf", "gemma-4-12b-it-qat-q4_0.gguf"},
+                mod + "model.gguf", "model weights (several GB)", false);
+  extract_first({"mmproj.gguf", "mmproj-gemma-4-12b-it-qat-q4_0.gguf"},
+                mod + "mmproj.gguf", "projector", false);
+
+  // 2. Resolve each piece: extracted internal first, then external flag/env.
+  RuntimePaths r;
+  auto pick = [](const std::string& internal, const std::string& external) {
+    if (file_nonempty(internal)) return internal;   // internal wins
+    if (!external.empty()) return external;          // then the outside path
+    return internal;                                 // else report it missing
+  };
+  r.llamafile = pick(bin + "llamafile", env_str("CHIMERA_LLAMAFILE"));
+  r.qlever_server = pick(bin + "qlever-server", env_str("CHIMERA_QLEVER_SERVER"));
+  r.qlever_index = pick(bin + "qlever-index", env_str("CHIMERA_QLEVER_INDEX"));
+  r.turbovec = pick(bin + "turbovec-server", env_str("CHIMERA_TURBOVEC"));
+
+  // Model: an explicit --model is a deliberate override and wins; otherwise
+  // internal weights, then CHIMERA_MODEL, then the (missing) internal path.
+  if (!model_flag.empty())
+    r.model = model_flag;
+  else
+    r.model = pick(mod + "model.gguf", env_str("CHIMERA_MODEL"));
+
+  // Projector: internal, then env, then mmproj-<model>.gguf beside the model.
+  r.mmproj = env_str("CHIMERA_MMPROJ");
+  if (file_nonempty(mod + "mmproj.gguf")) r.mmproj = mod + "mmproj.gguf";
   if (r.mmproj.empty() && !r.model.empty()) {
     fs::path mp = fs::path(r.model).parent_path() /
                   ("mmproj-" + fs::path(r.model).filename().string());
-    if (fs::exists(mp)) r.mmproj = mp.string();
+    if (file_nonempty(mp.string())) r.mmproj = mp.string();
   }
-  if (r.mmproj.empty() && fs::exists(mod + "mmproj.gguf")) r.mmproj = mod + "mmproj.gguf";
   return r;
 }
 
 std::optional<std::string> RuntimePaths::missing() const {
-  if (!exists(llamafile)) return "llamafile binary (" + llamafile + ")";
-  if (!exists(model)) return "model weights (" + model + "); pass --model PATH";
-  if (!exists(qlever_server)) return "qlever-server (" + qlever_server + ")";
-  if (!exists(qlever_index)) return "qlever-index (" + qlever_index + ")";
-  if (!exists(turbovec)) return "turbovec-server (" + turbovec + ")";
+  if (!file_nonempty(llamafile)) return "llamafile binary (" + llamafile + ")";
+  if (!file_nonempty(model)) return "model weights (" + model + "); pass --model PATH";
+  if (!file_nonempty(qlever_server)) return "qlever-server (" + qlever_server + ")";
+  if (!file_nonempty(qlever_index)) return "qlever-index (" + qlever_index + ")";
+  if (!file_nonempty(turbovec)) return "turbovec-server (" + turbovec + ")";
   return std::nullopt;
 }
 

@@ -28,10 +28,14 @@ cp "$CHIMERA" "$OUT/chimera.ape"
 
 if [ "${1:-}" = "--full" ]; then
   cp "$OUT/chimera.ape" "$OUT/chimera-full.ape"
-  (cd "$ROOT/vendor/llamafile-gemma" && \
-    "$ZIPALIGN" -j0 "$OUT/chimera-full.ape" \
-      models/gemma-4-12b-it-qat-q4_0.gguf \
-      models/mmproj-gemma-4-12b-it-qat-q4_0.gguf)
+  # Embed weights under CANONICAL names so the orchestrator finds them by a
+  # fixed /zip path (no directory listing — which zipos doesn't expose on
+  # macOS). zipalign -j0 junks the dir prefix, keeping the basename, so the
+  # symlinks land as /zip/model.gguf and /zip/mmproj.gguf.
+  MW="$ROOT/vendor/llamafile-gemma/models"
+  ln -sf "$MW/gemma-4-12b-it-qat-q4_0.gguf" "$STAGE/model.gguf"
+  ln -sf "$MW/mmproj-gemma-4-12b-it-qat-q4_0.gguf" "$STAGE/mmproj.gguf"
+  (cd "$STAGE" && "$ZIPALIGN" -j0 "$OUT/chimera-full.ape" model.gguf mmproj.gguf)
   echo "built: $OUT/chimera-full.ape ($(du -h "$OUT/chimera-full.ape" | cut -f1))"
 fi
 
