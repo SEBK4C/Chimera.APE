@@ -104,11 +104,30 @@ bash scripts/package.sh --full
 
 ```sh
 ./build-cosmo/chimera ingest ./small-corpus --gpu auto --verbose
-grep -iE 'ngl|CUDA|offloaded|GPU' ./small-corpus/.chimera/logs/llamafile.log
-# expect: a CUDA device line + "offloaded 49/49 layers" (or similar), and a
-# tokens/s in the hundreds rather than ~7.
+grep -iE 'CUDA|device_info|tg = |offloaded|ngl' ./small-corpus/.chimera/logs/llamafile.log
+# expect: a `device_info:` block listing each `CUDA0/CUDA1 : NVIDIA ...` device,
+# and `print_timing ... tg = N t/s` with N in the tens-to-hundreds rather than
+# ~7. (This llamafile auto-fits layers to device memory, so you see the CUDA
+# device lines + the throughput rather than a classic "offloaded 49/49" line.)
 ```
 
 If extraction or the embedding probe (`embedding dim: 3840`) succeeds, the GPU
 path is wired; compare tok/s in the llamafile log against the CPU baseline to
 confirm the offload took effect.
+
+### Verified
+
+End-to-end on **2× NVIDIA RTX 4090** (driver 580 / CUDA 12.8), `--gpu auto`
+offloads Gemma 4 12B across both cards and runs the full pipeline:
+
+- `device_info:` lists `CUDA0` and `CUDA1`; generation runs at **~90 tok/s**
+  (prompt eval ~2400 tok/s) versus ~7 tok/s on CPU.
+- **Dev build** (`build-cosmo/chimera`): ingest of a 3-doc corpus in **94 s**;
+  `--search` returns a `✓ verified` citation.
+- **`chimera-full.ape`** (single file, no `--model`/env): self-extracts organs +
+  weights, ingests in **~55 s**, `--search` answers with a `✓ verified` citation.
+- **`chimera.ape`** (organs embedded, weights via `--model`): ingests on GPU in
+  **~29 s** (warm model cache).
+
+Raw media embeddings remain CPU-only per the §"one caveat" above (use
+`--gpu off` for that ingest); text/chat/vision-describe all run on GPU.
