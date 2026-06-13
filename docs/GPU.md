@@ -43,25 +43,27 @@ first `ingest` will log the GPU it found and the offload count in
 
 ### Multimodal embeddings on GPU — the one caveat
 
-Gemma 4's **raw media embedding** path destabilizes the llamafile GPU backend:
-the `/v1/embeddings` call with `multimodal_data` returns HTTP 501 *and* wedges
-the server, so every subsequent embed/chat in the same run fails too — a single
-image would otherwise sink the whole ingest (text docs included). The
-orchestrator therefore **detects the GPU backend and skips the raw-media-vector
-call entirely** on GPU (you'll see `note: GPU backend — raw media vectors
-disabled (text bridge only)`). Consequence:
+Gemma 4 12B is a **dense, natively-multimodal** model — the right way to embed
+image/audio is to reuse its inference forward pass (projector + interleave) and
+take the **end hidden state**, *not* a separate pooled-embeddings graph. See
+[GEMMA4-EMBEDDINGS.md](GEMMA4-EMBEDDINGS.md) — read it before changing the embed
+path.
+
+What chimera does **today** is the older, dedicated path
+(`/v1/embeddings` with `{prompt_string, multimodal_data}`), which **crashes the
+GPU backend** (the dedicated embd-input graph segfaults on CUDA/Metal —
+reproduced here on 2× RTX 4090; the request kills the server). So on GPU the
+orchestrator **skips the raw-media-vector call** (`Organs::model_on_gpu()`):
 
 - **Text** embeddings, **chat**, and image/audio **chat** (transcribe/describe)
-  all work on GPU; media docs **index fully via their derived text** (the
+  all run on GPU; media docs **index fully via their derived text** (the
   primary retrieval path), so text→media search and `--search-file` work
   through the text bridge.
-- **Raw media vectors** (the ordinal-0 same-modality search vector) are not
-  produced on GPU. If you specifically want them, run that ingest with
-  `--gpu off` (media embedding works on CPU).
+- The **raw same-modality media vector** isn't produced on GPU yet. For it now,
+  run that ingest with `--gpu off` (the dedicated path works on CPU).
 
-This is an upstream llama.cpp/Gemma-4 GPU bug, not a chimera one; the
-orchestrator side-steps it by not issuing the call on GPU. Revisit when the
-vendored llamafile picks up a fix.
+This GPU skip is a **stopgap**. The real fix is the interleave+end-state path,
+which already runs fine on GPU (chat-with-media does) — see GEMMA4-EMBEDDINGS.md.
 
 ## Building on the GPU box
 
