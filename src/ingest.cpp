@@ -383,13 +383,33 @@ int run_ingest(const Options& o) {
       std::ofstream out(all, std::ios::trunc);
       out << ttl_prologue();
       for (const auto& f : fs::directory_iterator(db_dir + "/staging"))
-        if (f.path().extension() == ".ttl" && f.path().filename() != "_bulk.ttl") {
-          std::ifstream in(f.path());
-          out << in.rdbuf();
+        if (f.is_regular_file() && f.path().extension() == ".ttl" &&
+            f.path().filename() != "_bulk.ttl") {
+          // NB: `out << in.rdbuf()` sets failbit on an EMPTY source, which
+          // then silently drops every later file — and a kill -9 leaves an
+          // empty run-<pid>.ttl that sorts first. Read explicitly instead.
+          std::ifstream in(f.path(), std::ios::binary);
+          std::string content((std::istreambuf_iterator<char>(in)), {});
+          out << content;
         }
     }
+    // Guard against building from a Turtle file that lost its triples (e.g.
+    // the empty-source failbit bug above): if we wrote n_chunks chunks this
+    // run, the bulk file must contain at least that many chunk triples.
     std::string err;
-    if (!organs.build_qlever_index(all, &err)) {
+    int64_t ttl_chunks = 0;
+    {
+      std::ifstream in(all);
+      std::string line;
+      while (std::getline(in, line))
+        if (line.find("a ch:Chunk ") != std::string::npos) ++ttl_chunks;
+    }
+    if (n_chunks > 0 && ttl_chunks < n_chunks) {
+      std::fprintf(stderr,
+                   "chimera: staged graph has %lld chunk triples but %lld were "
+                   "written this run — refusing to build a truncated index\n",
+                   static_cast<long long>(ttl_chunks), static_cast<long long>(n_chunks));
+    } else if (!organs.build_qlever_index(all, &err)) {
       std::fprintf(stderr, "chimera: graph index build failed: %s\n", err.c_str());
     } else {
       graph_ok = true;
