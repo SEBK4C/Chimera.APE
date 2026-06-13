@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 
 #include "chunk.h"
 #include "extract.h"
@@ -39,7 +40,9 @@ namespace {
 
 int acquire_lock_or_die(const std::string& db_dir) {
   std::string lock_path = db_dir + "/lock";
-  int fd = ::open(lock_path.c_str(), O_CREAT | O_RDWR, 0644);
+  // O_CLOEXEC: without it the organ children inherit the lock fd and a
+  // crashed orchestrator leaves the db locked by its own surviving organs.
+  int fd = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0644);
   if (fd < 0 || ::flock(fd, LOCK_EX | LOCK_NB) != 0) {
     std::fprintf(stderr, "chimera: database is locked (%s)\n", lock_path.c_str());
     std::exit(1);
@@ -111,6 +114,10 @@ int run_ingest(const Options& o) {
     auto st = m.stage_of(doc_id);
     return st && *st >= static_cast<int>(Stage::kCommitted);
   };
+  // In-run dedup: the manifest only learns a docID once processing starts,
+  // so identical files seen during one walk must dedup against the work
+  // list itself or every copy embeds+extracts separately.
+  std::set<std::string> enqueued;
   walk(root, wo, [&](const WalkEntry& e) {
     auto known = m.path_info(e.rel_path);
     if (known && known->mtime == e.mtime && known->size == e.size &&
@@ -128,7 +135,7 @@ int run_ingest(const Options& o) {
       ++n_skipped;
       return;
     }
-    if (m.has_doc(*id) && fully_ingested(*id)) {
+    if (enqueued.count(*id) || (m.has_doc(*id) && fully_ingested(*id))) {
       // Dedup across paths (§2.3 job 1): one Document, many locatedAt.
       m.upsert_path(e.rel_path, e.mtime, e.size, *id);
       std::ofstream ttl(db_dir + "/staging/pending.ttl", std::ios::app);
@@ -158,6 +165,7 @@ int run_ingest(const Options& o) {
       w.chunks = chunk_text(text, e.mime);
     }
     // Media chunks are derived once the model is up (needs the organ).
+    enqueued.insert(*id);
     work.push_back(std::move(w));
   });
 
