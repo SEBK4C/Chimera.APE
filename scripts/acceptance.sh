@@ -100,10 +100,18 @@ mkdir -p "$WORK/kcorp"
 for i in 1 2 3; do printf 'kill test doc %d with unique content %d\n' "$i" "$i" > "$WORK/kcorp/k$i.txt"; done
 "$BIN" ingest "$WORK/kcorp" > "$WORK/k1.log" 2>&1 &
 IPID=$!
-sleep 100  # mid-pipeline: model is up, somewhere in embed/extract
+sleep 130  # mid-pipeline: model is up (~90s load), into embed/extract
 kill -9 $IPID 2>/dev/null
 sleep 2
-pkill -9 -f "$WORK/kcorp/.chimera" 2>/dev/null  # orphaned organs, if any
+# Orphaned organs bind ports/hold the model; kill every child whose cmdline
+# references this db (turbovec --path, qlever -i) AND the model server (its
+# log lives under this db, but its argv only has the model path — match the
+# llamafile started for this kcorp via its --port from the log).
+pkill -9 -f "$WORK/kcorp/.chimera" 2>/dev/null
+for p in $(grep -oh 'port [0-9]*' "$WORK/kcorp/.chimera/logs/llamafile.log" 2>/dev/null | awk '{print $2}' | sort -u); do
+  fuser -k "$p"/tcp 2>/dev/null
+done
+sleep 1
 rm -f "$WORK/kcorp/.chimera/lock"
 "$BIN" ingest "$WORK/kcorp" > "$WORK/k2.log" 2>&1
 grep -q "graph ok" "$WORK/k2.log" && ok "7a: resume completes" || { bad "7a: resume"; cat "$WORK/k2.log"; }
